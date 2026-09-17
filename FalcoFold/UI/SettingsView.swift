@@ -19,7 +19,6 @@ struct SettingsView: View {
 private struct GeneralSettings: View {
     @EnvironmentObject private var model: AppModel
     @AppStorage(SettingsKey.paused) private var paused = false
-    @AppStorage(SettingsKey.soundEnabled) private var soundEnabled = false
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var launchAtLoginError: String?
 
@@ -29,12 +28,6 @@ private struct GeneralSettings: View {
             Text("Press Esc while the effect is showing to pause it too.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-
-            HStack {
-                Toggle("Play a click when the desktop clears", isOn: $soundEnabled)
-                Spacer()
-                Button("Preview") { model.playClick() }
-            }
 
             Toggle("Launch at login", isOn: Binding(get: { launchAtLogin }, set: setLaunchAtLogin))
             if let launchAtLoginError {

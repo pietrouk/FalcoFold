@@ -55,7 +55,6 @@ enum SettingsKey {
     static let clearAngle = "clearAngle"
     static let counterRotate = "counterRotate"
     static let paused = "paused"
-    static let soundEnabled = "soundEnabled"
     static let hasCompletedOnboarding = "hasCompletedOnboarding"
 
     /// Keys that change what the effect does right now.
@@ -73,7 +72,6 @@ enum SettingsKey {
             clearAngle: 100.0,
             counterRotate: false,
             paused: false,
-            soundEnabled: false,
             hasCompletedOnboarding: false,
         ])
     }

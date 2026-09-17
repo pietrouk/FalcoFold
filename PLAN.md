@@ -4,7 +4,7 @@
 
 ## What it does
 
-As the MacBook lid comes down, the desktop tilts, blurs and darkens. When the lid opens past a set angle, the desktop snaps back to normal and a soft click plays.
+As the MacBook lid comes down, the desktop tilts, blurs and darkens. When the lid opens past a set angle, the desktop snaps back to normal.
 
 - Reads the hinge angle from the Mac's built-in lid angle sensor.
 - Captures the built-in display live and draws the effect with Metal in a click-through overlay, so windows and wallpaper move together.
@@ -12,7 +12,7 @@ As the MacBook lid comes down, the desktop tilts, blurs and darkens. When the li
 - Follows the lid automatically, or lets you drag the angle by hand.
 - If the lid stops partway while opening, the desktop snaps back right away instead of waiting for the clear angle. It comes back once the lid closes a few degrees again.
 - Lives in the menu bar. Click to pause, or press Esc while the effect is showing.
-- No sound when the desktop clears
+- No sound: the app plays no audio at all (a click was tried in M3 and removed).
 
 ## Project decisions
 
@@ -43,7 +43,7 @@ LidSensor ──angle──▶ LidState (smoothing, hysteresis, mapping to 0…1
                           │         │ CVPixelBuffer → CVMetalTextureCache → MTLTexture
                           │         ▼
                           └─▶ OverlayWindow + MetalRenderer (tilt, blur, shade)
-AppSettings (UserDefaults) ─▶ style presets, sliders, clear angle, sound, launch at login
+AppSettings (UserDefaults) ─▶ style presets, sliders, clear angle, launch at login
 MenuBar / Settings UI (SwiftUI)
 ```
 
@@ -56,7 +56,7 @@ MenuBar / Settings UI (SwiftUI)
 ### LidState
 - Low-pass or spring smoothing on the raw angle, with hysteresis around the arm and clear thresholds.
 - Mapping: `progress = clamp((clearAngle − angle) / (clearAngle − closedAngle), 0, 1)`.
-- **Armed** when the angle drops below the clear angle, which starts capture and shows the overlay. **Cleared** when the angle goes back above the clear angle plus hysteresis, which snaps back, plays the click, hides the overlay and stops capture.
+- **Armed** when the angle drops below the clear angle, which starts capture and shows the overlay. **Cleared** when the angle goes back above the clear angle plus hysteresis, which snaps back, hides the overlay and stops capture.
 - Manual mode uses a slider value instead of the sensor. **This is also how Claude can test visuals without anyone moving the lid.**
 
 ### CaptureController
@@ -82,11 +82,10 @@ MenuBar / Settings UI (SwiftUI)
 ### App shell
 - `MenuBarExtra` menu: Pause/Resume, style picker, manual-angle toggle and slider, Settings…, Quit.
 - Settings tabs:
-  - **General**: launch at login via `SMAppService`, sound on/off, pause
+  - **General**: launch at login via `SMAppService`, pause
   - **Style**: preset, sliders, clear angle
   - **About**: version, GitHub link, license
 - **Esc** without Accessibility permission: register a Carbon `RegisterEventHotKey` for Esc only while the effect is armed, and unregister it on clear. Never grab Esc globally.
-- Click sound: our own short CC0 or self-made `.caf`, played with `NSSound`.
 - First launch walks the user through granting Screen Recording and checking the sensor.
 
 ## Signing and permissions
@@ -105,7 +104,7 @@ Check the usage meter (`get_usage`) at the start of the session and after every 
 | M0 | Setup | Xcode active, `git init`, `project.yml`, `LICENSE` (MIT), `README` stub, `.gitignore`. An empty menu bar app builds and runs. | Sonnet |
 | M1 | **Risky core** | Live lid angle shown in the menu. The overlay shows the live desktop tilting as the angle changes (manual slider and real lid). **Stop and report usage here.** | Opus |
 | M2 | Effects | Perspective, blur and shade; three presets; smoothing, hysteresis, clear angle, snap-back; counter-rotate option | Opus |
-| M3 | App shell | Settings UI, pause, Esc hotkey, click sound, launch at login, permission onboarding | Sonnet |
+| M3 | App shell | Settings UI, pause, Esc hotkey, launch at login, permission onboarding | Sonnet |
 | M4 | Hardening | Built-in display only; clamshell mode (lid closed with external monitor → disabled); sleep/wake; display changes; full-screen Spaces; no capture when fully open; CPU/GPU check in Instruments | Opus |
 | M5 | Open-source release | README with GIF, build instructions, Gatekeeper and permission notes, a GitHub Release with a zipped `.app` | Sonnet |
 

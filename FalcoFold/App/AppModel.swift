@@ -19,11 +19,9 @@ final class AppModel: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let sensor = LidSensor()
-    private let effect = TiltEffect()
+    private let effect: TiltEffect?
     private let escapeHotKey = EscapeHotKey()
     private let windows = WindowPresenter()
-    private let clickSound = Bundle.main.url(forResource: "Click", withExtension: "caf")
-        .flatMap { NSSound(contentsOf: $0, byReference: true) }
     private var didPromptForScreenRecording = false
     private var observers: [NSObject] = []
     /// Lowest angle since the effect armed.
@@ -60,6 +58,7 @@ final class AppModel: ObservableObject {
 
     init() {
         SettingsKey.registerDefaults(in: defaults)
+        effect = TiltEffect()
 
         sensor.start()
         sensorAvailable = sensor.isAvailable
@@ -105,15 +104,6 @@ final class AppModel: ObservableObject {
     func finishOnboarding() {
         defaults.set(true, forKey: SettingsKey.hasCompletedOnboarding)
         windows.close("onboarding")
-    }
-
-    func playClick() {
-        guard let clickSound else {
-            log.error("Click sound missing from the app bundle")
-            return
-        }
-        clickSound.stop()
-        clickSound.play()
     }
 
     /// macOS only applies a new Screen Recording permission after the app restarts.
@@ -190,9 +180,6 @@ final class AppModel: ObservableObject {
         cancelSettle()
         guard armed else {
             escapeHotKey.unregister()
-            if effect.isArmed, !isPaused, defaults.bool(forKey: SettingsKey.soundEnabled) {
-                playClick()
-            }
             effect.disarm()
             return
         }

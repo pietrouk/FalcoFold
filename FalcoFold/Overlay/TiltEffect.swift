@@ -17,6 +17,9 @@ final class TiltEffect {
     var onError: ((Error) -> Void)?
 
     private(set) var isArmed = false
+    /// The system stopped capture, usually because the screen turned off as the lid got low.
+    /// The overlay stays up and capture restarts when the screen comes back.
+    private var isInterrupted = false
     private let device: MTLDevice
     private let capture: CaptureController
     private var window: NSWindow?
@@ -24,9 +27,6 @@ final class TiltEffect {
     /// Start/stop requests run one after another, so a fast arm → disarm → arm can't overlap streams.
     private var captureTask: Task<Void, Never>?
     private var generation = 0
-    /// The system stopped capture, usually because the screen turned off as the lid got low.
-    /// The overlay stays up and capture restarts when the screen comes back.
-    private var isInterrupted = false
     private let log = Logger(subsystem: "io.github.pietrouk.FalcoFold", category: "TiltEffect")
 
     init?() {
@@ -111,7 +111,7 @@ final class TiltEffect {
             tearDown()
             return
         }
-        log.notice("Capture interrupted (screen off?); retrying until it's back")
+        log.notice("Capture interrupted at \(self.targetAngle, privacy: .public)° (screen off?); retrying until it's back")
         isInterrupted = true
         startCapture()
     }
