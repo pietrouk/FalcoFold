@@ -8,9 +8,11 @@ final class AppModel: ObservableObject {
     static let closedAngle = 20.0
     /// The lid must open this far past the clear angle before the effect clears, so sensor jitter can't flicker it.
     static let hysteresis = 2.0
-    /// Opening the lid this far above its lowest point and then stopping clears the effect, even below the clear angle.
-    static let openingThreshold = 3.0
+    /// After the lid rests (or Esc is pressed), it must move this far before the effect shows again.
+    static let restThreshold = 3.0
+    /// How long the lid must hold still to count as resting. Wobbles smaller than `jitter` don't restart it.
     static let settleDelay = Duration.milliseconds(300)
+    static let jitter = 2.0
 
     @Published private(set) var sensorAngle: Double?
     @Published private(set) var sensorAvailable: Bool
@@ -26,10 +28,10 @@ final class AppModel: ObservableObject {
     private let windows = WindowPresenter()
     private var didPromptForScreenRecording = false
     private var observers: [Any] = []
-    /// Lowest angle since the effect armed.
-    private var lowestAngle: Double?
-    /// Where the lid came to rest after opening. The effect stays clear until the lid closes past this again.
+    /// Where the lid came to rest. The effect stays clear until the lid moves `restThreshold` away from here.
     private var restAngle: Double?
+    /// Esc was pressed: the effect stays away until the lid next comes to rest.
+    private var dismissedUntilRest = false
     private var settleAngle: Double?
     private var settleTask: Task<Void, Never>?
     private let log = Logger(subsystem: "io.github.pietrouk.FalcoFold", category: "AppModel")
@@ -168,42 +170,57 @@ final class AppModel: ObservableObject {
         guard let effect else { return }
 
         guard let angle = effectiveAngle, !isPaused, builtInDisplayPresent else {
+            cancelSettle()
             setArmed(false)
             return
         }
         let parameters = parameters
         effect.parameters = parameters
         effect.targetAngle = angle
-        if let rest = restAngle, angle <= rest - Self.openingThreshold || angle >= parameters.clearAngle {
+        let clearAngle = parameters.clearAngle
+
+        if defaults.bool(forKey: SettingsKey.manualMode) {
+            // Preview mode: the slider holds the effect for as long as it's below the clear angle.
+            restAngle = nil
+            dismissedUntilRest = false
+            cancelSettle()
+            if !isArmed, angle < clearAngle {
+                setArmed(true)
+            } else if isArmed, angle >= clearAngle + Self.hysteresis {
+                setArmed(false)
+            }
+            return
+        }
+
+        // The effect follows the lid while it moves below the clear angle, and clears once the lid rests.
+        if let rest = restAngle, abs(angle - rest) >= Self.restThreshold || angle >= clearAngle {
             restAngle = nil
         }
-        if !isArmed, angle < parameters.clearAngle, restAngle == nil {
+        if angle >= clearAngle { dismissedUntilRest = false }
+        if !isArmed, angle < clearAngle, restAngle == nil, !dismissedUntilRest {
             setArmed(true)
-            lowestAngle = angle
-        } else if isArmed, angle >= parameters.clearAngle + Self.hysteresis {
+        } else if isArmed, angle >= clearAngle + Self.hysteresis || dismissedUntilRest {
             setArmed(false)
-        } else if isArmed {
-            clearIfLidStopsOpening(at: angle)
         }
+        watchForRest(at: angle)
     }
 
-    /// Once the lid is opening, clear as soon as it holds still, so the effect doesn't linger at a slightly lower angle.
-    private func clearIfLidStopsOpening(at angle: Double) {
-        let lowest = min(lowestAngle ?? angle, angle)
-        lowestAngle = lowest
-        guard angle >= lowest + Self.openingThreshold else {
+    /// Restarts the rest countdown whenever the lid moves. When it fires, the effect clears (and an Esc
+    /// dismissal ends), so a lid that holds still always shows the normal desktop.
+    private func watchForRest(at angle: Double) {
+        guard isArmed || dismissedUntilRest else {
             cancelSettle()
             return
         }
-        // Restart the countdown only while the lid keeps opening; a one-degree wobble back doesn't count as movement.
-        if let settleAngle, angle <= settleAngle { return }
+        if let settleAngle, abs(angle - settleAngle) < Self.jitter { return }
         settleAngle = angle
         settleTask?.cancel()
         settleTask = Task { [weak self] in
             try? await Task.sleep(for: Self.settleDelay)
-            guard !Task.isCancelled, let self, self.isArmed, let angle = self.effectiveAngle else { return }
-            self.log.info("Lid stopped opening at \(angle, privacy: .public)°; clearing")
+            guard !Task.isCancelled, let self, let angle = self.effectiveAngle else { return }
+            self.log.info("Lid at rest at \(angle, privacy: .public)°; \(self.isArmed ? "clearing" : "Esc dismissal over", privacy: .public)")
             self.restAngle = angle
+            self.dismissedUntilRest = false
             self.setArmed(false)
         }
     }
@@ -218,7 +235,6 @@ final class AppModel: ObservableObject {
     private func setArmed(_ armed: Bool) {
         guard armed != isArmed, let effect else { return }
         isArmed = armed
-        lowestAngle = nil
         cancelSettle()
         guard armed else {
             escapeHotKey.unregister()
@@ -238,8 +254,17 @@ final class AppModel: ObservableObject {
         effect.arm()
         guard effect.isArmed else { return }
         escapeHotKey.register { [weak self] in
-            self?.log.info("Esc pressed; pausing")
-            self?.isPaused = true
+            guard let self else { return }
+            if self.defaults.bool(forKey: SettingsKey.manualMode) {
+                // The slider would arm it again at once, so end the preview instead of pausing.
+                self.log.info("Esc pressed; leaving manual mode")
+                self.defaults.set(false, forKey: SettingsKey.manualMode)
+            } else {
+                // Not a lasting pause: the effect returns once the lid rests and moves again.
+                self.log.info("Esc pressed; dismissing until the lid rests")
+                self.dismissedUntilRest = true
+                self.update()
+            }
         }
     }
 }
