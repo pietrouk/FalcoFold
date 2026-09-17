@@ -8,7 +8,8 @@ struct VertexUniforms {
 };
 
 struct FragmentUniforms {
-    float shade;  // 0…1
+    float shade;    // 0…1
+    float feather;  // capture pixels over which the edges fade to black, matching the blur
 };
 
 struct VertexOut {
@@ -54,7 +55,12 @@ fragment float4 tiltFragment(VertexOut in [[stage_in]],
 
     // Darker toward the top edge, which leans furthest away.
     float shade = u.shade * mix(0.35, 0.9, 1.0 - in.uv.y);
-    return float4(color * (1.0 - shade), 1.0);
+
+    // Soft edges: fade to black over the blur's width, and over at least one screen pixel so the
+    // slanted sides don't look jagged.
+    float2 edgeDistance = min(in.uv, 1.0 - in.uv) * size;
+    float fade = smoothstep(0.0, max(u.feather, footprint), min(edgeDistance.x, edgeDistance.y));
+    return float4(color * (1.0 - shade) * fade, 1.0);
 }
 
 // Sums every pixel of a 64×64 cell of the frame (see FrameFingerprint). One 16×16 threadgroup per cell;

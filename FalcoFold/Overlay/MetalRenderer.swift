@@ -54,6 +54,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private struct FragmentUniforms {
         var shade: Float
+        var feather: Float
     }
 
     init(device: MTLDevice, pixelFormat: MTLPixelFormat, parameters: EffectParameters, targetAngle: Double) throws {
@@ -128,13 +129,15 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         } else {
             vertexUniforms.tilt = Float(progress * p.style.perspective * maxTilt)
         }
-        var fragmentUniforms = FragmentUniforms(shade: Float(progress * p.style.shadow))
+        let sigma = progress * p.style.blur * maxBlurSigma
+        // A Gaussian edge settles within about 2.5 sigma.
+        var fragmentUniforms = FragmentUniforms(shade: Float(progress * p.style.shadow), feather: Float(sigma * 2.5))
 
         guard let pass = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let commandBuffer = commandQueue.makeCommandBuffer()
         else { return }
-        let texture = blurred(frame.texture, sigma: progress * p.style.blur * maxBlurSigma, commandBuffer: commandBuffer)
+        let texture = blurred(frame.texture, sigma: sigma, commandBuffer: commandBuffer)
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
         needsRedraw = false
         lastFrameID = frame.id
