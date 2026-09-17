@@ -1,18 +1,12 @@
 import AppKit
 import os
 
-extension UserDefaults {
-    // KVO-observable, so changes from the menu or from `defaults write` apply immediately.
-    @objc dynamic var manualMode: Bool { bool(forKey: "manualMode") }
-    @objc dynamic var manualAngle: Double { double(forKey: "manualAngle") }
-}
-
-/// Picks the angle source (sensor or manual slider), maps it to tilt progress, and arms or clears the effect.
+/// Picks the angle source (sensor or manual slider), decides when the effect arms and clears,
+/// and passes settings through to the effect.
 @MainActor
 final class AppModel: ObservableObject {
-    // Fixed for M1; these become settings in M2.
-    static let clearAngle = 100.0
     static let closedAngle = 20.0
+    /// The lid must open this far past the clear angle before the effect clears, so sensor jitter can't flicker it.
     static let hysteresis = 2.0
 
     @Published private(set) var sensorAngle: Double?
@@ -23,21 +17,30 @@ final class AppModel: ObservableObject {
     private let defaults = UserDefaults.standard
     private let sensor = LidSensor()
     private let effect = TiltEffect()
-    private var observations: [NSKeyValueObservation] = []
+    private var observers: [NSObject] = []
     private let log = Logger(subsystem: "io.github.pietrouk.FalcoFold", category: "AppModel")
 
+    var parameters: EffectParameters {
+        EffectParameters(
+            style: EffectStyle(
+                perspective: defaults.double(forKey: SettingsKey.perspective),
+                blur: defaults.double(forKey: SettingsKey.blur),
+                shadow: defaults.double(forKey: SettingsKey.shadow)),
+            clearAngle: defaults.double(forKey: SettingsKey.clearAngle),
+            closedAngle: Self.closedAngle,
+            counterRotate: defaults.bool(forKey: SettingsKey.counterRotate))
+    }
+
     var effectiveAngle: Double? {
-        defaults.manualMode ? defaults.manualAngle : sensorAngle
+        defaults.bool(forKey: SettingsKey.manualMode) ? defaults.double(forKey: SettingsKey.manualAngle) : sensorAngle
     }
 
     var progress: Double {
-        guard let angle = effectiveAngle else { return 0 }
-        let value = (Self.clearAngle - angle) / (Self.clearAngle - Self.closedAngle)
-        return min(max(value, 0), 1)
+        effectiveAngle.map { parameters.progress(at: $0) } ?? 0
     }
 
     init() {
-        defaults.register(defaults: ["manualMode": false, "manualAngle": 130.0])
+        SettingsKey.registerDefaults(in: defaults)
 
         sensor.start()
         sensorAvailable = sensor.isAvailable
@@ -52,16 +55,9 @@ final class AppModel: ObservableObject {
             self?.errorMessage = error.localizedDescription
         }
 
-        observations = [
-            defaults.observe(\.manualMode) { [weak self] _, _ in
-                DispatchQueue.main.async { self?.update() }
-            },
-            defaults.observe(\.manualAngle) { [weak self] _, _ in
-                DispatchQueue.main.async { self?.update() }
-            },
-        ]
+        observers = [DefaultsObserver(defaults, keys: SettingsKey.all) { [weak self] in self?.update() }]
         #if DEBUG
-        observations.append(DebugSnapshot.observe(defaults))
+        observers.append(DebugSnapshot.observe(defaults))
         #endif
         if effect == nil { errorMessage = "Metal is not available on this Mac." }
         update()
@@ -75,10 +71,12 @@ final class AppModel: ObservableObject {
             setArmed(false)
             return
         }
-        effect.progress = Float(progress)
-        if !isArmed, angle < Self.clearAngle {
+        let parameters = parameters
+        effect.parameters = parameters
+        effect.targetAngle = angle
+        if !isArmed, angle < parameters.clearAngle {
             setArmed(true)
-        } else if isArmed, angle >= Self.clearAngle + Self.hysteresis {
+        } else if isArmed, angle >= parameters.clearAngle + Self.hysteresis {
             setArmed(false)
         }
     }
