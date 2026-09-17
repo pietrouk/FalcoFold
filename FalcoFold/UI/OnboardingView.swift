@@ -49,7 +49,7 @@ struct OnboardingView: View {
             }
 
             Step(state: .info, title: "Try it") {
-                Text("Slowly lower the lid. Press Esc while the effect is showing to pause. Styles and settings are in the menu bar.")
+                Text("Slowly lower the lid. Press Esc while the effect is showing to dismiss it. Styles and settings are in the menu bar.")
             }
 
             HStack {

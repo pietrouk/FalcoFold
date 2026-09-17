@@ -10,3 +10,6 @@ DerivedData/
 
 # Release artifacts
 *.zip
+
+# Release zips from scripts/make-release.sh
+dist/

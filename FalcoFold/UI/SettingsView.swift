@@ -25,7 +25,7 @@ private struct GeneralSettings: View {
     var body: some View {
         Form {
             Toggle("Pause FalcoFold", isOn: $paused)
-            Text("Press Esc while the effect is showing to pause it too.")
+            Text("Press Esc while the effect is showing to dismiss it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
