@@ -9,6 +9,8 @@ import os
 /// This app's own windows are left out, so the overlay never captures itself.
 final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     struct Frame {
+        /// Counts up with every frame, so the renderer can tell a new frame from the one it already drew.
+        let id: Int
         let texture: MTLTexture
         /// Keeps the IOSurface behind `texture` alive while the renderer uses it.
         fileprivate let cvTexture: CVMetalTexture
@@ -23,10 +25,23 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     var onStop: ((Error) -> Void)?
 
     private let textureCache: CVMetalTextureCache
+    private let fingerprint: FrameFingerprint?
     private let queue = DispatchQueue(label: "io.github.pietrouk.FalcoFold.capture", qos: .userInteractive)
     private let lock = NSLock()
     private var stream: SCStream?
     private var latest: Frame?
+    private var frameCount = 0
+    /// Frame statistics, touched only on the sample handler queue.
+    private var stats = FrameStats()
+
+    private struct FrameStats {
+        var complete = 0
+        var unchanged = 0
+        var idle = 0
+        var other = 0
+        var dirtyFraction = 0.0
+        var since: CFTimeInterval?
+    }
     private let log = Logger(subsystem: "io.github.pietrouk.FalcoFold", category: "Capture")
 
     var latestFrame: Frame? { lock.withLock { latest } }
@@ -35,6 +50,9 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         var cache: CVMetalTextureCache?
         guard CVMetalTextureCacheCreate(nil, nil, device, nil, &cache) == kCVReturnSuccess, let cache else { return nil }
         textureCache = cache
+        fingerprint = FrameFingerprint(device: device)
+        super.init()
+        if fingerprint == nil { log.warning("Frame fingerprinting unavailable; the overlay will redraw at the display rate") }
     }
 
     func start(displayID: CGDirectDisplayID, scale: CGFloat, frameRate: Int) async throws {
@@ -80,6 +98,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         do { try await stream.stopCapture() } catch { log.error("stopCapture failed: \(error)") }
         lock.withLock { latest = nil }
         CVMetalTextureCacheFlush(textureCache, 0)
+        fingerprint?.reset()
     }
 
     // MARK: SCStreamOutput
@@ -88,10 +107,12 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         guard type == .screen, sampleBuffer.isValid,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
                 as? [[SCStreamFrameInfo: Any]],
-              let rawStatus = attachments.first?[.status] as? Int,
-              SCFrameStatus(rawValue: rawStatus) == .complete,
-              let pixelBuffer = sampleBuffer.imageBuffer
+              let info = attachments.first,
+              let rawStatus = info[.status] as? Int
         else { return }
+        let status = SCFrameStatus(rawValue: rawStatus)
+        countFrame(status, info: info)
+        guard status == .complete, let pixelBuffer = sampleBuffer.imageBuffer else { return }
 
         var cvTexture: CVMetalTexture?
         let width = CVPixelBufferGetWidth(pixelBuffer)
@@ -100,7 +121,36 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
                 nil, textureCache, pixelBuffer, nil, .bgra8Unorm, width, height, 0, &cvTexture) == kCVReturnSuccess,
               let cvTexture, let texture = CVMetalTextureGetTexture(cvTexture)
         else { return }
-        lock.withLock { latest = Frame(texture: texture, cvTexture: cvTexture) }
+        if let fingerprint, fingerprint.matchesPrevious(texture) {
+            stats.unchanged += 1   // usually the echo of our own last draw
+            return
+        }
+        lock.withLock {
+            frameCount += 1
+            latest = Frame(id: frameCount, texture: texture, cvTexture: cvTexture)
+        }
+    }
+
+    /// Every few seconds: how many frames arrived, how many had the same pixels as the one before, and how
+    /// much of the display the system flagged as changed. Shows whether the desktop was still or busy.
+    private func countFrame(_ status: SCFrameStatus?, info: [SCStreamFrameInfo: Any]) {
+        switch status {
+        case .complete:
+            stats.complete += 1
+            if let content = info[.contentRect] as? NSDictionary, let contentRect = CGRect(dictionaryRepresentation: content),
+               let dirty = info[.dirtyRects] as? [NSDictionary], contentRect.width > 0, contentRect.height > 0 {
+                let area = dirty.compactMap(CGRect.init(dictionaryRepresentation:)).reduce(0) { $0 + $1.width * $1.height }
+                stats.dirtyFraction += min(area / (contentRect.width * contentRect.height), 1)
+            }
+        case .idle: stats.idle += 1
+        default: stats.other += 1
+        }
+        let now = CACurrentMediaTime()
+        guard let since = stats.since else { stats.since = now; return }
+        guard now - since >= 5 else { return }
+        let averageDirty = stats.complete > 0 ? stats.dirtyFraction / Double(stats.complete) * 100 : 0
+        log.info("Frames in \(now - since, format: .fixed(precision: 1)) s: \(self.stats.complete) complete (\(self.stats.unchanged) unchanged, avg \(averageDirty, format: .fixed(precision: 1))% flagged), \(self.stats.idle) idle, \(self.stats.other) other")
+        stats = FrameStats(since: now)
     }
 
     // MARK: SCStreamDelegate

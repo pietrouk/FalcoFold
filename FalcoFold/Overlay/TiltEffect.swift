@@ -27,6 +27,8 @@ final class TiltEffect {
     /// Start/stop requests run one after another, so a fast arm → disarm → arm can't overlap streams.
     private var captureTask: Task<Void, Never>?
     private var generation = 0
+    /// Pixel size of the display being captured, to tell whether a display change needs a new stream.
+    private var capturedPixelSize: CGSize?
     private let log = Logger(subsystem: "io.github.pietrouk.FalcoFold", category: "TiltEffect")
 
     init?() {
@@ -74,12 +76,14 @@ final class TiltEffect {
                     guard let screen = NSScreen.builtIn, let displayID = screen.displayID else {
                         throw CaptureController.CaptureError.displayNotFound
                     }
+                    let pixelSize = screen.pixelSize
                     try await capture.start(displayID: displayID, scale: screen.backingScaleFactor,
                                             frameRate: max(screen.maximumFramesPerSecond, 60))
                     guard armGeneration == self.generation else {
                         await capture.stop()
                         return
                     }
+                    self.capturedPixelSize = pixelSize
                     if self.isInterrupted {
                         self.isInterrupted = false
                         self.window?.setFrame(screen.frame, display: false)
@@ -116,6 +120,28 @@ final class TiltEffect {
         startCapture()
     }
 
+    /// After a display change: moves the overlay to where the built-in display now is, restarts capture
+    /// if the display's size changed, and hides everything at once if the display is gone (clamshell mode).
+    func screensChanged() {
+        guard let window else { return }
+        guard let screen = NSScreen.builtIn else {
+            log.notice("Built-in display is gone; hiding the overlay")
+            isArmed = false
+            tearDown()
+            return
+        }
+        if window.frame != screen.frame { window.setFrame(screen.frame, display: false) }
+        guard !isInterrupted, let capturedPixelSize, capturedPixelSize != screen.pixelSize else { return }
+        log.info("Built-in display changed size; restarting capture")
+        generation += 1
+        let previous = captureTask
+        captureTask = Task { [capture] in
+            await previous?.value
+            await capture.stop()
+        }
+        startCapture()
+    }
+
     /// Snaps the desktop back to flat, then hides the overlay and stops capture.
     func disarm() {
         guard isArmed else { return }
@@ -130,6 +156,7 @@ final class TiltEffect {
     private func tearDown() {
         generation += 1
         isInterrupted = false
+        capturedPixelSize = nil
         hideOverlay()
         let previous = captureTask
         captureTask = Task { [capture] in
@@ -197,6 +224,11 @@ extension NSScreen {
         (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber).map { CGDirectDisplayID($0.uint32Value) }
     }
 
+    var pixelSize: CGSize {
+        CGSize(width: frame.width * backingScaleFactor, height: frame.height * backingScaleFactor)
+    }
+
+    /// Nil while the built-in display is off, e.g. in clamshell mode with an external monitor.
     static var builtIn: NSScreen? {
         screens.first { screen in screen.displayID.map { CGDisplayIsBuiltin($0) != 0 } ?? false }
     }

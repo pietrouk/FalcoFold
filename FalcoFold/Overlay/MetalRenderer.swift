@@ -28,6 +28,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var angle: Double
     private var velocity = 0.0
     private var lastDrawTime: CFTimeInterval?
+    private var lastFrameID: Int?
+    private var lastParameters: EffectParameters?
+    private var needsRedraw = true
+    private var drawCount = 0
+    private var skipCount = 0
+    private var statsSince: CFTimeInterval?
     private let createdAt = ContinuousClock.now
     private var clearingStartedAt: ContinuousClock.Instant?
 
@@ -88,7 +94,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         isClearing = false
     }
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { needsRedraw = true }
 
     func draw(in view: MTKView) {
         // Draw nothing until the first frame arrives, so the overlay stays transparent instead of black.
@@ -99,6 +105,17 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         lastDrawTime = now
 
         let p = parameters
+        // Once the spring has settled on a frame that's already on screen, there's nothing new to draw.
+        // Skipping keeps the GPU idle while the desktop is still, instead of re-rendering at the display rate.
+        if abs(angle - springTarget) < 0.005, abs(velocity) < 0.05 {
+            angle = springTarget
+            velocity = 0
+            if hasDrawn, !needsRedraw, !isClearing, frame.id == lastFrameID, p == lastParameters {
+                skipCount += 1
+                logStats(at: now)
+                return
+            }
+        }
         let progress = p.progress(at: angle)
         var vertexUniforms = VertexUniforms(tilt: 0, eyeY: 0, eyeZ: Float(viewerDistance))
         if p.counterRotate {
@@ -119,6 +136,9 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         else { return }
         let texture = blurred(frame.texture, sigma: progress * p.style.blur * maxBlurSigma, commandBuffer: commandBuffer)
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        needsRedraw = false
+        lastFrameID = frame.id
+        lastParameters = p
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBytes(&vertexUniforms, length: MemoryLayout<VertexUniforms>.stride, index: 0)
@@ -129,6 +149,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         encoder.endEncoding()
         commandBuffer.present(drawable)
         commandBuffer.commit()
+        drawCount += 1
+        logStats(at: now)
 
         if !hasDrawn {
             hasDrawn = true
@@ -143,9 +165,21 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    private var springTarget: Double { isClearing ? parameters.clearAngle : targetAngle }
+
+    /// Every few seconds while showing: how many display refreshes needed a new render.
+    private func logStats(at now: CFTimeInterval) {
+        guard let since = statsSince else { statsSince = now; return }
+        guard now - since >= 5 else { return }
+        log.info("Rendered \(self.drawCount) frames, skipped \(self.skipCount) refreshes in \(now - since, format: .fixed(precision: 1)) s")
+        drawCount = 0
+        skipCount = 0
+        statsSince = now
+    }
+
     /// Critically damped spring toward the target (or toward the clear angle while snapping back).
     private func advanceSpring(by dt: Double) {
-        let target = isClearing ? parameters.clearAngle : targetAngle
+        let target = springTarget
         let omega = isClearing ? snapStiffness : followStiffness
         // Small fixed substeps keep semi-implicit Euler stable at any frame rate.
         var remaining = dt

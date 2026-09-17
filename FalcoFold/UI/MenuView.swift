@@ -10,6 +10,12 @@ struct MenuView: View {
                 Text(model.sensorAvailable ? model.sensorAngle.map { "\(Int($0))°" } ?? "…" : "Unsupported hardware")
                     .monospacedDigit()
             }
+            if !model.builtInDisplayPresent {
+                Text("The built-in display is off, so the effect waits until it's back.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             Button {
                 paused.toggle()

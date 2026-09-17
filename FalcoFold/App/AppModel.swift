@@ -16,6 +16,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var sensorAvailable: Bool
     @Published private(set) var isArmed = false
     @Published private(set) var errorMessage: String?
+    /// False in clamshell mode (lid closed with an external monitor), when the effect has nowhere to draw.
+    @Published private(set) var builtInDisplayPresent = NSScreen.builtIn != nil
 
     private let defaults = UserDefaults.standard
     private let sensor = LidSensor()
@@ -23,7 +25,7 @@ final class AppModel: ObservableObject {
     private let escapeHotKey = EscapeHotKey()
     private let windows = WindowPresenter()
     private var didPromptForScreenRecording = false
-    private var observers: [NSObject] = []
+    private var observers: [Any] = []
     /// Lowest angle since the effect armed.
     private var lowestAngle: Double?
     /// Where the lid came to rest after opening. The effect stays clear until the lid closes past this again.
@@ -69,12 +71,21 @@ final class AppModel: ObservableObject {
             }
         }
 
+        sensor.onAvailabilityChange = { [weak self] available in
+            MainActor.assumeIsolated {
+                self?.sensorAvailable = available
+                if !available { self?.sensorAngle = nil }
+                self?.update()
+            }
+        }
+
         effect?.onError = { [weak self] error in
             self?.escapeHotKey.unregister()
             self?.errorMessage = error.localizedDescription
         }
 
         observers = [DefaultsObserver(defaults, keys: SettingsKey.all) { [weak self] in self?.update() }]
+        observeSystemChanges()
         #if DEBUG
         observers.append(DebugSnapshot.observe(defaults))
         #endif
@@ -121,11 +132,42 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Display changes (external monitor, clamshell mode, resolution) and waking from sleep.
+    private func observeSystemChanges() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.screensChanged() }
+        })
+        observers.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.log.info("Woke from sleep")
+                self?.sensor.refresh()
+                self?.screensChanged()
+            }
+        })
+        observers.append(workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.update() }
+        })
+    }
+
+    private func screensChanged() {
+        let present = NSScreen.builtIn != nil
+        if present != builtInDisplayPresent {
+            log.notice("Built-in display \(present ? "is back" : "is off (clamshell mode?)", privacy: .public)")
+            builtInDisplayPresent = present
+        }
+        effect?.screensChanged()
+        update()
+    }
+
     private func update() {
         objectWillChange.send()
+        sensor.fastPollBelow = defaults.double(forKey: SettingsKey.clearAngle) + 15
         guard let effect else { return }
 
-        guard let angle = effectiveAngle, !isPaused else {
+        guard let angle = effectiveAngle, !isPaused, builtInDisplayPresent else {
             setArmed(false)
             return
         }

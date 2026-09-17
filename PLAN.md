@@ -33,6 +33,7 @@ As the MacBook lid comes down, the desktop tilts, blurs and darkens. When the li
 - MacBook Pro M3 Pro (`Mac15,7`), running macOS 27 (Darwin 27).
 - The lid sensor is present: HID vendor `0x05AC`, product `0x8104`, usage page `0x20`, usage `0x8A` (`las` in `hidutil list`).
 - Only the Command Line Tools were installed, not Xcode. **Install Xcode before starting**, then run `sudo xcode-select -s /Applications/Xcode.app` and confirm with `xcodebuild -version`.
+- In zsh, `log` is a shell builtin. Use `/usr/bin/log stream --info --predicate 'subsystem == "io.github.pietrouk.FalcoFold"'` to read the app's log (info lines aren't persisted, so stream during the test).
 
 ## Architecture
 
@@ -52,6 +53,7 @@ MenuBar / Settings UI (SwiftUI)
 - Known approach (from the open-source LidAngleSensor project; **verify in M1**): read feature report ID 1 with `IOHIDDeviceGetReport`. The angle in degrees is a 16-bit little-endian value in bytes 1–2.
 - Bendy says it doesn't poll. Try an input-value callback first. If the device only answers feature-report requests, poll at ~60 Hz but only while the app is active.
 - Reopen the device after sleep/wake. If the device is missing, show "unsupported hardware" in the menu instead of crashing.
+- M4: a feature-report read costs ~0.4 ms, so polling is 60 Hz only below `clearAngle + 15°` and 10 Hz above (idle CPU ~0.5%). The device also pushes input report 1 (same bytes) about once a second when still; `LidSensor` parses those too and logs "Sensor pushed N°" when they change, to learn whether pushes track movement. Device add/remove callbacks reopen it after sleep.
 
 ### LidState
 - Low-pass or spring smoothing on the raw angle, with hysteresis around the arm and clear thresholds.
@@ -65,6 +67,8 @@ MenuBar / Settings UI (SwiftUI)
 - Use `SCContentFilter(display:excludingApplications:[self])` so the overlay never captures itself. Don't rely on `NSWindow.sharingType = .none`.
 - Measure how long the stream takes to start. If there's a visible lag when arming, keep a low-fps stream warm while the angle is in a "near clear" band.
 - Check access with `CGPreflightScreenCaptureAccess()` and request it with `CGRequestScreenCaptureAccess()`. Newer macOS versions re-ask periodically, so handle revoked access gracefully.
+- **Echo loop (found in M4):** every overlay draw counts as a screen change, so the stream sends a new frame after each draw even though the captured pixels are the same. `FrameFingerprint` sums each frame's pixels on the GPU (64×64-pixel cells) and drops frames identical to the previous one; the renderer then skips refreshes with nothing new. A still desktop costs almost nothing; a busy one redraws only when pixels change.
+- macOS periodically shows a "FalcoFold is requesting to bypass the system private window picker" dialog. Capture keeps running; the user clicks Allow.
 
 ### OverlayWindow + MetalRenderer
 - Borderless `NSWindow` covering the built-in display, with `ignoresMouseEvents = true`, level above normal windows (e.g. `.screenSaver`), and `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]`.
@@ -110,14 +114,14 @@ Check the usage meter (`get_usage`) at the start of the session and after every 
 
 ## Test checklist
 - [ ] Lid from fully open to ~10° and back: smooth, no flicker, snaps back cleanly
-- [ ] Overlay never appears in its own capture (no infinite tunnel)
+- [x] Overlay never appears in its own capture (no infinite tunnel)
 - [ ] Clicks and typing pass through the overlay
-- [ ] Esc pauses while armed and doesn't steal Esc otherwise
-- [ ] External monitor attached, lid closed (clamshell): nothing happens
-- [ ] Sleep/wake and display changes: sensor and capture recover
+- [x] Esc pauses while armed and doesn't steal Esc otherwise
+- [ ] External monitor attached, lid closed (clamshell): nothing happens (M4 code: built-in display gone → overlay hidden, menu says why; needs a real test)
+- [ ] Sleep/wake and display changes: sensor and capture recover (M4 code: wake re-reads the sensor, display changes move the overlay and restart capture; needs a real test)
 - [ ] Full-screen app, Mission Control, Stage Manager
 - [ ] Screen Recording denied or revoked: clear message, no crash
-- [ ] Idle with lid fully open: ~0% CPU, no active capture
+- [x] Idle with lid fully open: ~0% CPU, no active capture (0.5% in M4)
 - [ ] Mac without the sensor: "unsupported" message
 
 ## Out of scope

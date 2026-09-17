@@ -56,3 +56,31 @@ fragment float4 tiltFragment(VertexOut in [[stage_in]],
     float shade = u.shade * mix(0.35, 0.9, 1.0 - in.uv.y);
     return float4(color * (1.0 - shade), 1.0);
 }
+
+// Sums every pixel of a 64×64 cell of the frame (see FrameFingerprint). One 16×16 threadgroup per cell;
+// each thread reads a 4×4 patch, then the SIMD groups and the threadgroup reduce the totals.
+kernel void frameFingerprint(texture2d<float, access::read> frame [[texture(0)]],
+                             device uint4 *sums [[buffer(0)]],
+                             constant uint &cellsPerRow [[buffer(1)]],
+                             uint2 tid [[thread_position_in_grid]],
+                             uint2 group [[threadgroup_position_in_grid]],
+                             uint lane [[thread_index_in_simdgroup]],
+                             uint simdIndex [[simdgroup_index_in_threadgroup]]) {
+    uint2 size = uint2(frame.get_width(), frame.get_height());
+    uint2 origin = tid * 4;
+    uint4 sum = 0;
+    for (uint y = origin.y; y < min(origin.y + 4, size.y); y++) {
+        for (uint x = origin.x; x < min(origin.x + 4, size.x); x++) {
+            sum += uint4(frame.read(uint2(x, y)) * 255.0 + 0.5);
+        }
+    }
+    sum = simd_sum(sum);
+    threadgroup uint4 partial[8];
+    if (lane == 0) partial[simdIndex] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simdIndex == 0 && lane == 0) {
+        uint4 total = 0;
+        for (uint i = 0; i < 8; i++) total += partial[i];
+        sums[group.y * cellsPerRow + group.x] = total;
+    }
+}
