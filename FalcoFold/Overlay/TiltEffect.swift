@@ -1,5 +1,6 @@
 import AppKit
 import MetalKit
+import ScreenCaptureKit
 import os
 
 /// Owns the click-through overlay on the built-in display, the Metal renderer and the capture stream.
@@ -23,6 +24,9 @@ final class TiltEffect {
     /// Start/stop requests run one after another, so a fast arm → disarm → arm can't overlap streams.
     private var captureTask: Task<Void, Never>?
     private var generation = 0
+    /// The system stopped capture, usually because the screen turned off as the lid got low.
+    /// The overlay stays up and capture restarts when the screen comes back.
+    private var isInterrupted = false
     private let log = Logger(subsystem: "io.github.pietrouk.FalcoFold", category: "TiltEffect")
 
     init?() {
@@ -30,7 +34,7 @@ final class TiltEffect {
         self.device = device
         self.capture = capture
         capture.onStop = { [weak self] error in
-            MainActor.assumeIsolated { self?.fail(error) }
+            MainActor.assumeIsolated { self?.captureStopped(error) }
         }
     }
 
@@ -42,13 +46,12 @@ final class TiltEffect {
             renderer.cancelClearing()
             return
         }
-        guard let screen = NSScreen.builtIn, let displayID = screen.displayID else {
+        guard let screen = NSScreen.builtIn else {
             fail(CaptureController.CaptureError.displayNotFound)
             return
         }
         isArmed = true
         generation += 1
-        let armGeneration = generation
 
         do {
             try showOverlay(on: screen)
@@ -56,27 +59,68 @@ final class TiltEffect {
             fail(error)
             return
         }
+        startCapture()
+    }
 
+    /// Starts capture after any pending start or stop. While interrupted, keeps retrying until the screen is back.
+    private func startCapture() {
+        let armGeneration = generation
         let previous = captureTask
-        let scale = screen.backingScaleFactor
-        let frameRate = max(screen.maximumFramesPerSecond, 60)
         captureTask = Task { [weak self, capture] in
             await previous?.value
-            guard let self, armGeneration == self.generation else { return }
-            do {
-                try await capture.start(displayID: displayID, scale: scale, frameRate: frameRate)
-                if armGeneration != self.generation { await capture.stop() }
-            } catch {
-                if armGeneration == self.generation { self.fail(error) }
+            while true {
+                guard let self, armGeneration == self.generation else { return }
+                do {
+                    guard let screen = NSScreen.builtIn, let displayID = screen.displayID else {
+                        throw CaptureController.CaptureError.displayNotFound
+                    }
+                    try await capture.start(displayID: displayID, scale: screen.backingScaleFactor,
+                                            frameRate: max(screen.maximumFramesPerSecond, 60))
+                    guard armGeneration == self.generation else {
+                        await capture.stop()
+                        return
+                    }
+                    if self.isInterrupted {
+                        self.isInterrupted = false
+                        self.window?.setFrame(screen.frame, display: false)
+                        self.log.info("Capture resumed")
+                    }
+                    return
+                } catch {
+                    guard self.isInterrupted else {
+                        if armGeneration == self.generation { self.fail(error) }
+                        return
+                    }
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
             }
         }
+    }
+
+    private func captureStopped(_ error: Error) {
+        guard renderer != nil else { return }
+        let error = error as NSError
+        // -3821 is SCStreamError.systemStoppedStream, which the SDK only names from macOS 15.
+        let recoverable = [SCStreamError.Code.noCaptureSource.rawValue, -3821]
+        guard error.domain == SCStreamErrorDomain, recoverable.contains(error.code) else {
+            fail(error)
+            return
+        }
+        guard isArmed else {
+            // Was snapping back; without frames there's nothing left to animate.
+            tearDown()
+            return
+        }
+        log.notice("Capture interrupted (screen off?); retrying until it's back")
+        isInterrupted = true
+        startCapture()
     }
 
     /// Snaps the desktop back to flat, then hides the overlay and stops capture.
     func disarm() {
         guard isArmed else { return }
         isArmed = false
-        guard let renderer, renderer.hasDrawn else {
+        guard let renderer, renderer.hasDrawn, !isInterrupted else {
             tearDown()
             return
         }
@@ -85,6 +129,7 @@ final class TiltEffect {
 
     private func tearDown() {
         generation += 1
+        isInterrupted = false
         hideOverlay()
         let previous = captureTask
         captureTask = Task { [capture] in

@@ -8,6 +8,9 @@ final class AppModel: ObservableObject {
     static let closedAngle = 20.0
     /// The lid must open this far past the clear angle before the effect clears, so sensor jitter can't flicker it.
     static let hysteresis = 2.0
+    /// Opening the lid this far above its lowest point and then stopping clears the effect, even below the clear angle.
+    static let openingThreshold = 3.0
+    static let settleDelay = Duration.milliseconds(300)
 
     @Published private(set) var sensorAngle: Double?
     @Published private(set) var sensorAvailable: Bool
@@ -17,7 +20,18 @@ final class AppModel: ObservableObject {
     private let defaults = UserDefaults.standard
     private let sensor = LidSensor()
     private let effect = TiltEffect()
+    private let escapeHotKey = EscapeHotKey()
+    private let windows = WindowPresenter()
+    private let clickSound = Bundle.main.url(forResource: "Click", withExtension: "caf")
+        .flatMap { NSSound(contentsOf: $0, byReference: true) }
+    private var didPromptForScreenRecording = false
     private var observers: [NSObject] = []
+    /// Lowest angle since the effect armed.
+    private var lowestAngle: Double?
+    /// Where the lid came to rest after opening. The effect stays clear until the lid closes past this again.
+    private var restAngle: Double?
+    private var settleAngle: Double?
+    private var settleTask: Task<Void, Never>?
     private let log = Logger(subsystem: "io.github.pietrouk.FalcoFold", category: "AppModel")
 
     var parameters: EffectParameters {
@@ -33,6 +47,11 @@ final class AppModel: ObservableObject {
 
     var effectiveAngle: Double? {
         defaults.bool(forKey: SettingsKey.manualMode) ? defaults.double(forKey: SettingsKey.manualAngle) : sensorAngle
+    }
+
+    var isPaused: Bool {
+        get { defaults.bool(forKey: SettingsKey.paused) }
+        set { defaults.set(newValue, forKey: SettingsKey.paused) }
     }
 
     var progress: Double {
@@ -52,6 +71,7 @@ final class AppModel: ObservableObject {
         }
 
         effect?.onError = { [weak self] error in
+            self?.escapeHotKey.unregister()
             self?.errorMessage = error.localizedDescription
         }
 
@@ -61,41 +81,136 @@ final class AppModel: ObservableObject {
         #endif
         if effect == nil { errorMessage = "Metal is not available on this Mac." }
         update()
+
+        if !defaults.bool(forKey: SettingsKey.hasCompletedOnboarding) {
+            // Wait for launch to finish, so the window can come to the front.
+            DispatchQueue.main.async { self.showOnboarding() }
+        }
+    }
+
+    // MARK: Windows
+
+    func showSettings() {
+        windows.show("settings", title: "FalcoFold Settings", kind: .floatingUtility) {
+            SettingsView().environmentObject(self)
+        }
+    }
+
+    func showOnboarding() {
+        windows.show("onboarding", title: "Welcome to FalcoFold", kind: .regular) {
+            OnboardingView().environmentObject(self)
+        }
+    }
+
+    func finishOnboarding() {
+        defaults.set(true, forKey: SettingsKey.hasCompletedOnboarding)
+        windows.close("onboarding")
+    }
+
+    func playClick() {
+        guard let clickSound else {
+            log.error("Click sound missing from the app bundle")
+            return
+        }
+        clickSound.stop()
+        clickSound.play()
+    }
+
+    /// macOS only applies a new Screen Recording permission after the app restarts.
+    func relaunch() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
+            DispatchQueue.main.async {
+                if let error {
+                    self.errorMessage = "Couldn't relaunch: \(error.localizedDescription)"
+                } else {
+                    NSApp.terminate(nil)
+                }
+            }
+        }
     }
 
     private func update() {
         objectWillChange.send()
         guard let effect else { return }
 
-        guard let angle = effectiveAngle else {
+        guard let angle = effectiveAngle, !isPaused else {
             setArmed(false)
             return
         }
         let parameters = parameters
         effect.parameters = parameters
         effect.targetAngle = angle
-        if !isArmed, angle < parameters.clearAngle {
+        if let rest = restAngle, angle <= rest - Self.openingThreshold || angle >= parameters.clearAngle {
+            restAngle = nil
+        }
+        if !isArmed, angle < parameters.clearAngle, restAngle == nil {
             setArmed(true)
+            lowestAngle = angle
         } else if isArmed, angle >= parameters.clearAngle + Self.hysteresis {
             setArmed(false)
+        } else if isArmed {
+            clearIfLidStopsOpening(at: angle)
         }
+    }
+
+    /// Once the lid is opening, clear as soon as it holds still, so the effect doesn't linger at a slightly lower angle.
+    private func clearIfLidStopsOpening(at angle: Double) {
+        let lowest = min(lowestAngle ?? angle, angle)
+        lowestAngle = lowest
+        guard angle >= lowest + Self.openingThreshold else {
+            cancelSettle()
+            return
+        }
+        // Restart the countdown only while the lid keeps opening; a one-degree wobble back doesn't count as movement.
+        if let settleAngle, angle <= settleAngle { return }
+        settleAngle = angle
+        settleTask?.cancel()
+        settleTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.settleDelay)
+            guard !Task.isCancelled, let self, self.isArmed, let angle = self.effectiveAngle else { return }
+            self.log.info("Lid stopped opening at \(angle, privacy: .public)°; clearing")
+            self.restAngle = angle
+            self.setArmed(false)
+        }
+    }
+
+    private func cancelSettle() {
+        settleTask?.cancel()
+        settleTask = nil
+        settleAngle = nil
     }
 
     /// A failed arm isn't retried until the lid clears again, so errors can't cause a restart loop.
     private func setArmed(_ armed: Bool) {
         guard armed != isArmed, let effect else { return }
         isArmed = armed
+        lowestAngle = nil
+        cancelSettle()
         guard armed else {
+            escapeHotKey.unregister()
+            if effect.isArmed, !isPaused, defaults.bool(forKey: SettingsKey.soundEnabled) {
+                playClick()
+            }
             effect.disarm()
             return
         }
         guard CGPreflightScreenCaptureAccess() else {
-            log.notice("Screen Recording not granted; requesting")
-            CGRequestScreenCaptureAccess()
-            errorMessage = "Allow FalcoFold in System Settings → Privacy & Security → Screen Recording, then relaunch."
+            log.notice("Screen Recording not granted")
+            errorMessage = "FalcoFold needs Screen Recording permission."
+            if !didPromptForScreenRecording {
+                didPromptForScreenRecording = true
+                showOnboarding()
+            }
             return
         }
         errorMessage = nil
         effect.arm()
+        guard effect.isArmed else { return }
+        escapeHotKey.register { [weak self] in
+            self?.log.info("Esc pressed; pausing")
+            self?.isPaused = true
+        }
     }
 }

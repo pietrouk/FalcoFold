@@ -54,8 +54,12 @@ enum SettingsKey {
     static let shadow = "shadow"
     static let clearAngle = "clearAngle"
     static let counterRotate = "counterRotate"
+    static let paused = "paused"
+    static let soundEnabled = "soundEnabled"
+    static let hasCompletedOnboarding = "hasCompletedOnboarding"
 
-    static let all = [manualMode, manualAngle, preset, perspective, blur, shadow, clearAngle, counterRotate]
+    /// Keys that change what the effect does right now.
+    static let all = [manualMode, manualAngle, preset, perspective, blur, shadow, clearAngle, counterRotate, paused]
 
     static func registerDefaults(in defaults: UserDefaults) {
         let style = StylePreset.silk.style
@@ -68,6 +72,9 @@ enum SettingsKey {
             shadow: style.shadow,
             clearAngle: 100.0,
             counterRotate: false,
+            paused: false,
+            soundEnabled: false,
+            hasCompletedOnboarding: false,
         ])
     }
 }

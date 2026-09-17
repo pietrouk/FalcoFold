@@ -10,6 +10,7 @@ As the MacBook lid comes down, the desktop tilts, blurs and darkens. When the li
 - Captures the built-in display live and draws the effect with Metal in a click-through overlay, so windows and wallpaper move together.
 - Three styles: **Silk**, **Shade** and **Frost**. Each has sliders for perspective, blur and shadow, plus a setting for the angle where the effect clears.
 - Follows the lid automatically, or lets you drag the angle by hand.
+- If the lid stops partway while opening, the desktop snaps back right away instead of waiting for the clear angle. It comes back once the lid closes a few degrees again.
 - Lives in the menu bar. Click to pause, or press Esc while the effect is showing.
 - No sound when the desktop clears
 
